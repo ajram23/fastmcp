@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import inspect
-from collections.abc import Awaitable, Callable
+import time
+from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import quote
@@ -52,11 +53,37 @@ logger = get_logger(__name__)
 # Type alias for client factory functions
 ClientFactoryT = Callable[[], Client] | Callable[[], Awaitable[Client]]
 
+# Default TTL for proxy component-list cache (seconds).
+# Backport of FastMCP 3.2.0 PR #3479 — matches upstream default.
+_DEFAULT_CACHE_TTL: float = 300.0
+
+
+class _CacheEntry:
+    """A cached sequence of components with a monotonic timestamp.
+
+    Backport of FastMCP 3.2.0 PR #3479 cache entry shape.
+    Uses __slots__ to minimize per-entry overhead.
+    """
+
+    __slots__ = ("items", "timestamp")
+
+    def __init__(self, items: Any, timestamp: float):
+        self.items = items
+        self.timestamp = timestamp
+
+    def is_fresh(self, ttl: float) -> bool:
+        return (time.monotonic() - self.timestamp) < ttl
+
 
 class ProxyManagerMixin:
     """A mixin for proxy managers to provide a unified client retrieval method."""
 
     client_factory: ClientFactoryT
+    _cache_ttl: float
+    _tools_cache: _CacheEntry | None
+    _resources_cache: _CacheEntry | None
+    _templates_cache: _CacheEntry | None
+    _prompts_cache: _CacheEntry | None
 
     async def _get_client(self) -> Client:
         """Gets a client instance by calling the sync or async factory."""
@@ -65,16 +92,49 @@ class ProxyManagerMixin:
             client = await client
         return client
 
+    def _init_cache(self, cache_ttl: float | None = None) -> None:
+        """Initialize cache slots. Called from each proxy manager __init__.
+
+        Backport of FastMCP 3.2.0 PR #3479. Passing cache_ttl=0 disables caching.
+        """
+        self._cache_ttl = cache_ttl if cache_ttl is not None else _DEFAULT_CACHE_TTL
+        self._tools_cache = None
+        self._resources_cache = None
+        self._templates_cache = None
+        self._prompts_cache = None
+
+    def invalidate_cache(self) -> None:
+        """Force next get_*() call to re-fetch from upstream."""
+        self._tools_cache = None
+        self._resources_cache = None
+        self._templates_cache = None
+        self._prompts_cache = None
+
 
 class ProxyToolManager(ToolManager, ProxyManagerMixin):
     """A ToolManager that sources its tools from a remote client in addition to local and mounted tools."""
 
-    def __init__(self, client_factory: ClientFactoryT, **kwargs: Any):
+    def __init__(
+        self,
+        client_factory: ClientFactoryT,
+        cache_ttl: float | None = None,
+        **kwargs: Any,
+    ):
         super().__init__(**kwargs)
         self.client_factory = client_factory
+        self._init_cache(cache_ttl)
 
     async def get_tools(self) -> dict[str, Tool]:
-        """Gets the unfiltered tool inventory including local, mounted, and proxy tools."""
+        """Gets the unfiltered tool inventory including local, mounted, and proxy tools.
+
+        Caches the result for ``cache_ttl`` seconds (default 300s, backport of
+        FastMCP 3.2.0 PR #3479). Since ``ToolManager.get_tool(key)`` calls
+        ``get_tools()`` and indexes the returned dict, this transparently
+        accelerates every tool lookup including the per-call dispatch path.
+        """
+        if self._tools_cache is not None and self._tools_cache.is_fresh(self._cache_ttl):
+            return dict(self._tools_cache.items)
+
         # First get local and mounted tools from parent
         all_tools = await super().get_tools()
 
@@ -97,6 +157,7 @@ class ProxyToolManager(ToolManager, ProxyManagerMixin):
             transformations=self.transformations,
         )
 
+        self._tools_cache = _CacheEntry(dict(transformed_tools), time.monotonic())
         return transformed_tools
 
     async def list_tools(self) -> list[Tool]:
@@ -124,12 +185,21 @@ class ProxyToolManager(ToolManager, ProxyManagerMixin):
 class ProxyResourceManager(ResourceManager, ProxyManagerMixin):
     """A ResourceManager that sources its resources from a remote client in addition to local and mounted resources."""
 
-    def __init__(self, client_factory: ClientFactoryT, **kwargs: Any):
+    def __init__(
+        self,
+        client_factory: ClientFactoryT,
+        cache_ttl: float | None = None,
+        **kwargs: Any,
+    ):
         super().__init__(**kwargs)
         self.client_factory = client_factory
+        self._init_cache(cache_ttl)
 
     async def get_resources(self) -> dict[str, Resource]:
         """Gets the unfiltered resource inventory including local, mounted, and proxy resources."""
+        if self._resources_cache is not None and self._resources_cache.is_fresh(self._cache_ttl):
+            return dict(self._resources_cache.items)
+
         # First get local and mounted resources from parent
         all_resources = await super().get_resources()
 
@@ -149,10 +219,14 @@ class ProxyResourceManager(ResourceManager, ProxyManagerMixin):
             else:
                 raise e
 
+        self._resources_cache = _CacheEntry(dict(all_resources), time.monotonic())
         return all_resources
 
     async def get_resource_templates(self) -> dict[str, ResourceTemplate]:
         """Gets the unfiltered template inventory including local, mounted, and proxy templates."""
+        if self._templates_cache is not None and self._templates_cache.is_fresh(self._cache_ttl):
+            return dict(self._templates_cache.items)
+
         # First get local and mounted templates from parent
         all_templates = await super().get_resource_templates()
 
@@ -172,6 +246,7 @@ class ProxyResourceManager(ResourceManager, ProxyManagerMixin):
             else:
                 raise e
 
+        self._templates_cache = _CacheEntry(dict(all_templates), time.monotonic())
         return all_templates
 
     async def list_resources(self) -> list[Resource]:
@@ -207,12 +282,21 @@ class ProxyResourceManager(ResourceManager, ProxyManagerMixin):
 class ProxyPromptManager(PromptManager, ProxyManagerMixin):
     """A PromptManager that sources its prompts from a remote client in addition to local and mounted prompts."""
 
-    def __init__(self, client_factory: ClientFactoryT, **kwargs: Any):
+    def __init__(
+        self,
+        client_factory: ClientFactoryT,
+        cache_ttl: float | None = None,
+        **kwargs: Any,
+    ):
         super().__init__(**kwargs)
         self.client_factory = client_factory
+        self._init_cache(cache_ttl)
 
     async def get_prompts(self) -> dict[str, Prompt]:
         """Gets the unfiltered prompt inventory including local, mounted, and proxy prompts."""
+        if self._prompts_cache is not None and self._prompts_cache.is_fresh(self._cache_ttl):
+            return dict(self._prompts_cache.items)
+
         # First get local and mounted prompts from parent
         all_prompts = await super().get_prompts()
 
@@ -232,6 +316,7 @@ class ProxyPromptManager(PromptManager, ProxyManagerMixin):
             else:
                 raise e
 
+        self._prompts_cache = _CacheEntry(dict(all_prompts), time.monotonic())
         return all_prompts
 
     async def list_prompts(self) -> list[Prompt]:
