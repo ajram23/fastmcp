@@ -24,10 +24,15 @@ isolation/invalidation/`get_tool` lookup cache).
 
 ## Orbit tag
 
-`v2.14.4-orbit.1` — first stable release of this backport.
+`v2.14.4.post1` — first stable release of this backport. Named as a PEP 440
+post-release of upstream `2.14.4` so that `uv-dynamic-versioning` (style=
+`pep440`, configured in upstream `pyproject.toml`) can parse it during
+`pip install` from the Git URL. A custom suffix like `v2.14.4-orbit.1`
+normalizes to `2.14.4orbit1`, which is not PEP 440 compliant and breaks
+install-time version resolution.
 
 ```
-fastmcp @ git+https://github.com/ajram23/fastmcp@v2.14.4-orbit.1
+fastmcp @ git+https://github.com/ajram23/fastmcp@v2.14.4.post1
 ```
 
 ## When to retire this fork
