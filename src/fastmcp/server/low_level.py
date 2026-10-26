@@ -215,11 +215,16 @@ class LowLevelServer(_Server[LifespanResultT, RequestT]):
                 # Store task group on session for subscription tasks (SEP-1686)
                 session._subscription_task_group = tg
 
-                async for message in session.incoming_messages:
-                    tg.start_soon(
-                        self._handle_message,
-                        message,
-                        session,
-                        lifespan_context,
-                        raise_exceptions,
-                    )
+                try:
+                    async for message in session.incoming_messages:
+                        tg.start_soon(
+                            self._handle_message,
+                            message,
+                            session,
+                            lifespan_context,
+                            raise_exceptions,
+                        )
+                finally:
+                    # Transport closed: cancel in-flight handlers instead of waiting
+                    # for them, as mcp's Server.run does.
+                    tg.cancel_scope.cancel()
