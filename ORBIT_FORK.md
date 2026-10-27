@@ -28,8 +28,8 @@ isolation/invalidation/`get_tool` lookup cache).
 `Server.run` and drops its `finally: tg.cancel_scope.cancel()`. Without it, a
 client that ends its session (streamable-HTTP `DELETE`) leaves its tool call
 running to completion, because the task group joins the handler instead of
-cancelling it. Upstream v2.14.4, v2.14.7 and v3.4.10 all lack it. The fork
-restores the `finally`.
+cancelling it. Upstream v2.14.4, v2.14.7, v3.4.10 and v3.4.11 (the latest 3.x)
+all lack it. The fork restores the `finally`.
 
 Tests: `tests/server/test_low_level_cancel.py`.
 
@@ -48,6 +48,8 @@ fastmcp @ git+https://github.com/ajram23/fastmcp@v2.14.4.post2
 
 ## When to retire this fork
 
-Delete the fork and switch back to upstream PyPI `fastmcp` once Orbit
-upgrades to `fastmcp>=3.2.0`, which carries the same cache natively
-(in `ProxyProvider` under `src/fastmcp/server/providers/proxy.py`).
+Delete the fork and switch back to upstream PyPI `fastmcp` only on a release
+that carries both changes. The cache is native from `fastmcp>=3.2.0` (in
+`ProxyProvider` under `src/fastmcp/server/providers/proxy.py`), but the cancel
+is still missing in v3.4.11. 4.x keeps the cache, drops the `run` override
+and inherits mcp's `Server.run`, so the fork can go with a move to 4.x.
